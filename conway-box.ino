@@ -1,7 +1,107 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#define SCREEN_WIDTH 128  // OLED display width, in pixels
+#define SCREEN_HEIGHT 64  // OLED display height, in pixels
+#define SCREEN_SDA_PIN 6
+#define SCREEN_SCL_PIN 5
+#define OLED_RESET -1
+#define SCREEN_ADDRESS 0x3C
+#define SCREEN_I2C_FREQ_HZ 800000
+
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET, SCREEN_I2C_FREQ_HZ, SCREEN_I2C_FREQ_HZ);
+
+uint8_t grid[SCREEN_HEIGHT][SCREEN_WIDTH];
+uint8_t newGrid[SCREEN_HEIGHT][SCREEN_WIDTH];
+int generation = 0;
+
+/**
+ * @brief Initializes the grid with random alive/dead values.
+ *
+ * This function populates the grid with random values, either 0 (dead)
+ * or 1 (alive). This is used to initialize the grid at the start of
+ * the Game of Life.
+ */
+void initGrid() {
+  for (int i = 0; i < SCREEN_HEIGHT; i++) {
+    for (int j = 0; j < SCREEN_WIDTH; j++) {
+      // todo: seed random, use arduino random?
+      grid[i][j] = rand() % 2;
+    }
+  }
+}
+
+/**
+ * @brief Counts the number of alive neighbours for a given cell.
+ *
+ * This function takes two arguments, i and j, which represent the
+ * coordinates of the cell in the grid. It then iterates over the
+ * eight cells in the Moore neighbourhood of the cell, counting the
+ * number of cells that are alive. Note that the cell itself is
+ * excluded from the count.
+ *
+ * The function uses the modulo operator to wrap around the edges of
+ * the grid, so the function works correctly even when the cell is
+ * located at the edge of the grid.
+ *
+ * @param i The row of the cell in the grid.
+ * @param j The column of the cell in the grid.
+ * @return The number of alive neighbours of the cell.
+ */
+int countAliveNeighbours(int i, int j) {
+  int count = 0;
+  for (int k = -1; k <= 1; k++) {
+    for (int l = -1; l <= 1; l++) {
+      int x = (i + k + SCREEN_HEIGHT) % SCREEN_HEIGHT;
+      int y = (j + l + SCREEN_WIDTH) % SCREEN_WIDTH;
+      count += grid[x][y];
+    }
+  }
+  count -= grid[i][j];
+  return count;
+}
+
+/**
+ * @brief Updates the grid according to the rules of the Game of Life.
+ *
+ * This function creates a new grid with the same dimensions as the
+ * current grid, then iterates over each cell in the current grid.
+ * For each cell, it counts the number of alive neighbours, and then
+ * applies the rules of the Game of Life to determine whether the cell
+ * should be alive or dead in the new grid. The new grid is then
+ * copied back into the current grid.
+ */
+void updateGrid() {
+  for (int i = 0; i < SCREEN_HEIGHT; i++) {
+    for (int j = 0; j < SCREEN_WIDTH; j++) {
+      int count = countAliveNeighbours(i, j);
+      newGrid[i][j] = (grid[i][j] == 1) ? (count == 2 || count == 3) : (count == 3);
+    }
+  }
+  for (int i = 0; i < SCREEN_HEIGHT; i++) {
+    for (int j = 0; j < SCREEN_WIDTH; j++) {
+      grid[i][j] = newGrid[i][j];
+      display.drawPixel(j, i, grid[i][j] ? SSD1306_WHITE : SSD1306_BLACK);
+    }
+  }
+}
+
 void setup() {
-  // put your setup code here, to run once:
+  Serial.begin(9600);
+  Wire.begin(SCREEN_SDA_PIN, SCREEN_SCL_PIN);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for (;;)
+      ;  // Don't proceed, loop forever
+  }
+
+  display.clearDisplay();
+  initGrid();
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  updateGrid();
+  display.display();
 }
