@@ -1,3 +1,5 @@
+// Board: Waveshare ESP32-S3-Zero
+
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -30,13 +32,16 @@ const uint8_t I2S_SDOUT = 2;
 
 I2SClass i2s;
 
-const uint16_t samples = 1024; // must be a power of 2
+const uint16_t samples = 1024;  // must be a power of 2
 float vReal[samples];
 float vImag[samples];
 
 int16_t i2s_buf[samples];
 
-/* Create FFT object with weighing factor storage */
+//int freqBins[] = { 5, 8, 11, 20 };
+int freqBins[] = { 7, 12 };
+float fftGain = 2.0f;
+
 ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, samples, sampleRate);
 
 TaskHandle_t Task0;
@@ -113,40 +118,65 @@ void updateGrid() {
   }
 }
 
-void Task0code(void* pvParameters) {
-  for (;;) {
-  updateGrid();
-  unsigned long start = micros();
-  for(int i = 0; i < samples; i++) {
+/**
+ * @brief fills vReal with audio based on the grid
+ */
+void computeAudio() {
+
+  // Init the complex vector
+  for (int i = 0; i < samples; i++) {
     vReal[i] = 0.0f;
     vImag[i] = 0.0f;
   }
-  int k = 20;
-  vReal[k] = 1024.0f*8000.0f;
-  vReal[1024-k] = vReal[k];
-  vImag[1024-k] = -1.0f*vImag[k];
-  FFT.compute(FFTDirection::Reverse);
-  for(int i = 0; i < samples; i++) {
-    i2s_buf[i] = vReal[i];
-    // Serial.print(vImag[i]);
-    // Serial.print(" ");
+
+  // Loop through the bins and see how much each grid pixel has to contribute
+  // Also only do the real part since imaginary sounds too loud unpleasant
+  const int binsLen = sizeof(freqBins) / sizeof(freqBins[0]);
+  int m = 0;
+  for (int i = 0; i < SCREEN_HEIGHT; i++) {
+    for (int j = 0; j < SCREEN_WIDTH; j++) {
+      int binMult = 1;
+      if (i > SCREEN_HEIGHT / 2) {
+        binMult = 2;
+      }
+      if (j > SCREEN_WIDTH / 2) {
+        binMult *= 3;
+      }
+      int freqBin = freqBins[(m++) % binsLen] * binMult;
+      freqBin = freqBin % (1024 / 2);
+      vReal[freqBin] += grid[i][j] * 1024.0f * fftGain;
+    }
   }
-  // Serial.println();
-  // delay(1000);
-  // Serial.print(micros()-start);
-  // Serial.println();
-  display.display();
+
+  // Create conjugate symmetry
+  for (int i = 1; i < 1024 / 2 - 1; i++) {
+    vReal[1024 - i] = vReal[i];
+    vImag[1024 - i] = -1.0f * vImag[i];
+  }
+
+  FFT.compute(FFTDirection::Reverse);
+}
+
+void Task0code(void* pvParameters) {
+  for (;;) {
+    updateGrid();
+    computeAudio();
+    display.display();
+    // Make the audio reflect what's on the screen now
+    for (int i = 0; i < samples; i++) {
+      i2s_buf[i] = constrain(vReal[i % (1024 / 2)], -16000.0f, 16000.0f);
+    }
   }
 }
 
 void Task1code(void* pvParameters) {
   for (;;) {
-  size_t r = i2s.write((uint8_t*)i2s_buf, samples*2);
-  if(r > 0) {
-    // Serial.print("write");
-    // Serial.print(r);
-    // Serial.println();
-  }
+    size_t r = i2s.write((uint8_t*)i2s_buf, samples * 2);
+    if (r > 0) {
+      // Serial.print("write");
+      // Serial.print(r);
+      // Serial.println();
+    }
   }
 }
 
