@@ -30,19 +30,24 @@ const uint8_t I2S_SCK = 3;
 const uint8_t I2S_WS = 4;
 const uint8_t I2S_SDOUT = 2;
 
+// Amp is a little overpowered so clamp it to be safe
+float sampleMax = 16000.0f;
+
 I2SClass i2s;
 
-const uint16_t samples = 1024;  // must be a power of 2
-float vReal[samples];
-float vImag[samples];
+const uint16_t fftLen = 1024;  // must be a power of 2
+const uint16_t fftLenBy2 = fftLen / 2;
+float vReal[fftLen];
+float vImag[fftLen];
 
-int16_t i2s_buf[samples];
+const int i2sBufLenSamples = 1024;
+int16_t i2s_buf[i2sBufLenSamples];
 
-//int freqBins[] = { 5, 8, 11, 20 };
-int freqBins[] = { 7, 12 };
-float fftGain = 2.0f;
 
-ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, samples, sampleRate);
+int freqBins[] = { 3, 5 };
+float fftGain = 4.0f;
+
+ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, fftLen, sampleRate);
 
 TaskHandle_t Task0;
 TaskHandle_t Task1;
@@ -57,8 +62,7 @@ TaskHandle_t Task1;
 void initGrid() {
   for (int i = 0; i < SCREEN_HEIGHT; i++) {
     for (int j = 0; j < SCREEN_WIDTH; j++) {
-      // todo: seed random, use arduino random?
-      grid[i][j] = rand() % 2;
+      grid[i][j] = random(0, 2);
     }
   }
 }
@@ -124,7 +128,7 @@ void updateGrid() {
 void computeAudio() {
 
   // Init the complex vector
-  for (int i = 0; i < samples; i++) {
+  for (int i = 0; i < fftLen; i++) {
     vReal[i] = 0.0f;
     vImag[i] = 0.0f;
   }
@@ -143,15 +147,15 @@ void computeAudio() {
         binMult *= 3;
       }
       int freqBin = freqBins[(m++) % binsLen] * binMult;
-      freqBin = freqBin % (1024 / 2);
-      vReal[freqBin] += grid[i][j] * 1024.0f * fftGain;
+      freqBin = freqBin % fftLenBy2;
+      vReal[freqBin] += grid[i][j] * 1.0f * fftLenBy2 * fftGain;
     }
   }
 
   // Create conjugate symmetry
-  for (int i = 1; i < 1024 / 2 - 1; i++) {
-    vReal[1024 - i] = vReal[i];
-    vImag[1024 - i] = -1.0f * vImag[i];
+  for (int i = 1; i < fftLenBy2 - 1; i++) {
+    vReal[fftLen - i] = vReal[i];
+    vImag[fftLen - i] = -1.0f * vImag[i];
   }
 
   FFT.compute(FFTDirection::Reverse);
@@ -163,41 +167,36 @@ void Task0code(void* pvParameters) {
     computeAudio();
     display.display();
     // Make the audio reflect what's on the screen now
-    for (int i = 0; i < samples; i++) {
-      i2s_buf[i] = constrain(vReal[i % (1024 / 2)], -16000.0f, 16000.0f);
+    for (int i = 0; i < i2sBufLenSamples; i++) {
+      i2s_buf[i] = constrain(vReal[i % (fftLenBy2)], -sampleMax, sampleMax);
     }
   }
 }
 
 void Task1code(void* pvParameters) {
   for (;;) {
-    size_t r = i2s.write((uint8_t*)i2s_buf, samples * 2);
-    if (r > 0) {
-      // Serial.print("write");
-      // Serial.print(r);
-      // Serial.println();
-    }
+    // I2S write is blocking
+    i2s.write((uint8_t*)i2s_buf, i2sBufLenSamples * sizeof(int16_t));
   }
 }
 
 void setup() {
   Serial.begin(9600);
-  Wire.begin(SCREEN_SDA_PIN, SCREEN_SCL_PIN);
+  useRealRandomGenerator(true);
 
+  Wire.begin(SCREEN_SDA_PIN, SCREEN_SCL_PIN);
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-    Serial.println(F("SSD1306 allocation failed"));
+    Serial.println("SSD1306 allocation failed");
     while (1)
       ;  // do nothing
   }
 
   i2s.setPins(I2S_SCK, I2S_WS, I2S_SDOUT);
-
   if (!i2s.begin(mode, sampleRate, bps, slot)) {
     Serial.println("Failed to initialize I2S!");
     while (1)
       ;  // do nothing
   }
-
   display.clearDisplay();
   initGrid();
 
