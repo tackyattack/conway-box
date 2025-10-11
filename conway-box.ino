@@ -2,6 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <ESP_I2S.h>
+#include <arduinoFFT.h>
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -28,6 +29,15 @@ const uint8_t I2S_WS = 4;
 const uint8_t I2S_SDOUT = 2;
 
 I2SClass i2s;
+
+const uint16_t samples = 1024; // must be a power of 2
+float vReal[samples];
+float vImag[samples];
+
+int16_t i2s_buf[samples];
+
+/* Create FFT object with weighing factor storage */
+ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, samples, sampleRate);
 
 TaskHandle_t Task0;
 TaskHandle_t Task1;
@@ -106,14 +116,32 @@ void updateGrid() {
 void Task0code(void* pvParameters) {
   for (;;) {
   updateGrid();
+  unsigned long start = micros();
+  for(int i = 0; i < samples; i++) {
+    vReal[i] = 0.0f;
+    vImag[i] = 0.0f;
+  }
+  int k = 20;
+  vReal[k] = 1024.0f*8000.0f;
+  vReal[1024-k] = vReal[k];
+  vImag[1024-k] = -1.0f*vImag[k];
+  FFT.compute(FFTDirection::Reverse);
+  for(int i = 0; i < samples; i++) {
+    i2s_buf[i] = vReal[i];
+    // Serial.print(vImag[i]);
+    // Serial.print(" ");
+  }
+  // Serial.println();
+  // delay(1000);
+  // Serial.print(micros()-start);
+  // Serial.println();
   display.display();
   }
 }
 
 void Task1code(void* pvParameters) {
   for (;;) {
-  uint8_t x[1024];
-  size_t r = i2s.write(x, 4096);
+  size_t r = i2s.write((uint8_t*)i2s_buf, samples*2);
   if(r > 0) {
     // Serial.print("write");
     // Serial.print(r);
