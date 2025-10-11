@@ -1,9 +1,10 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <ESP_I2S.h>
 
-#define SCREEN_WIDTH 128  // OLED display width, in pixels
-#define SCREEN_HEIGHT 64  // OLED display height, in pixels
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
 #define SCREEN_SDA_PIN 6
 #define SCREEN_SCL_PIN 5
 #define OLED_RESET -1
@@ -15,6 +16,21 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET, SCREEN_
 uint8_t grid[SCREEN_HEIGHT][SCREEN_WIDTH];
 uint8_t newGrid[SCREEN_HEIGHT][SCREEN_WIDTH];
 int generation = 0;
+
+const int sampleRate = 44100;
+
+i2s_data_bit_width_t bps = I2S_DATA_BIT_WIDTH_16BIT;
+i2s_mode_t mode = I2S_MODE_STD;
+i2s_slot_mode_t slot = I2S_SLOT_MODE_MONO;
+
+const uint8_t I2S_SCK = 3;
+const uint8_t I2S_WS = 4;
+const uint8_t I2S_SDOUT = 2;
+
+I2SClass i2s;
+
+TaskHandle_t Task0;
+TaskHandle_t Task1;
 
 /**
  * @brief Initializes the grid with random alive/dead values.
@@ -87,21 +103,49 @@ void updateGrid() {
   }
 }
 
+void Task0code(void* pvParameters) {
+  for (;;) {
+  updateGrid();
+  display.display();
+  }
+}
+
+void Task1code(void* pvParameters) {
+  for (;;) {
+  uint8_t x[1024];
+  size_t r = i2s.write(x, 4096);
+  if(r > 0) {
+    // Serial.print("write");
+    // Serial.print(r);
+    // Serial.println();
+  }
+  }
+}
+
 void setup() {
   Serial.begin(9600);
   Wire.begin(SCREEN_SDA_PIN, SCREEN_SCL_PIN);
 
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println(F("SSD1306 allocation failed"));
-    for (;;)
-      ;  // Don't proceed, loop forever
+    while (1)
+      ;  // do nothing
+  }
+
+  i2s.setPins(I2S_SCK, I2S_WS, I2S_SDOUT);
+
+  if (!i2s.begin(mode, sampleRate, bps, slot)) {
+    Serial.println("Failed to initialize I2S!");
+    while (1)
+      ;  // do nothing
   }
 
   display.clearDisplay();
   initGrid();
+
+  xTaskCreatePinnedToCore(Task0code, "Task0", 10000, NULL, 2, &Task0, 0);
+  xTaskCreatePinnedToCore(Task1code, "Task1", 10000, NULL, 3, &Task1, 0);
 }
 
 void loop() {
-  updateGrid();
-  display.display();
 }
