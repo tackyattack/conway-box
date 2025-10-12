@@ -23,25 +23,27 @@ uint8_t grid[SCREEN_HEIGHT][SCREEN_WIDTH];
 uint8_t newGrid[SCREEN_HEIGHT][SCREEN_WIDTH];
 int generation = 0;
 const int maxGridLifeSeconds = 60;
-const int sampleRate = 44100;
+const int maxGridStaticSeconds = 5;
 
-// Amp is a little overpowered so clamp it to be safe
-float sampleMax = 16000.0f;
-float rmsTarget = 1000.0f;
+const int sampleRate = 44100;
+float sampleMax = 16000.0f;  // amp is a little overpowered so clamp it to be safe
+float rmsTarget = 8000.0f;
 I2SClass i2s;
 const int i2sBufLenSamples = 1024;
-int16_t i2s_buf[i2sBufLenSamples];
+int16_t i2sBuf[i2sBufLenSamples];
 
 const uint16_t fftLen = 1024;  // must be a power of 2
 const uint16_t fftLenBy2 = fftLen / 2;
 float vReal[fftLen];
 float vImag[fftLen];
 const int freqBinMin = 5;
-const int freqBinMax = 400;
+const int freqBinMax = 40;
+const int widthStride = 20;
+const int heightStride = 20;
 ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, fftLen, sampleRate);
 
-TaskHandle_t Task0;
-TaskHandle_t Task1;
+TaskHandle_t DisplayTask;
+TaskHandle_t I2STransferTask;
 
 /**
  * @brief Initializes the grid with random alive/dead values.
@@ -137,8 +139,8 @@ void computeAudio() {
   // Also only do the real part since messing with the phase sounds too unpleasant
   float freqScaleWidth = (1.0f / SCREEN_WIDTH) * (freqBinMax - freqBinMin) / 2.0f;
   float freqScaleHeight = (1.0f / SCREEN_HEIGHT) * (freqBinMax - freqBinMin) / 2.0f;
-  for (int i = 0; i < SCREEN_HEIGHT; i++) {
-    for (int j = 0; j < SCREEN_WIDTH; j++) {
+  for (int i = 0; i < SCREEN_HEIGHT; i += heightStride) {
+    for (int j = 0; j < SCREEN_WIDTH; j += widthStride) {
       int freqBin = freqBinMin + i * freqScaleHeight + j * freqScaleWidth;
 
       // Make sure we don't generate something out of bounds
@@ -166,42 +168,49 @@ void computeAudio() {
     rms = rms / fftLen;
     rms = sqrtf(rms);
 
-
     float gain = rmsTarget / rms;
-
     for (int i = 0; i < fftLen; i++) {
       vReal[i] *= gain;
     }
   }
 }
 
+/**
+ * @brief Updates the grid and handles re-init if necessary
+ */
 void computeGrid() {
   static int lastChange = 0;
   static int staticCount = 0;
+  static int lastChangeTimeMs = 0;
   static unsigned long lastGridInitMs = 0;
 
   int changes = updateGrid();
-  if (lastChange == changes) {
-    staticCount++;
-  } else {
-    staticCount = 0;
+  if (lastChange != changes) {
+    lastChangeTimeMs = millis();
   }
   lastChange = changes;
 
   // If we're oscillating, static, or hit the max life then re-init the grid
-  if ((staticCount > 100) || ((millis() - lastGridInitMs) > maxGridLifeSeconds * 1000)) {
+  if (((millis() - lastChangeTimeMs) > maxGridStaticSeconds * 1000) || ((millis() - lastGridInitMs) > maxGridLifeSeconds * 1000)) {
     initGrid();
     lastGridInitMs = millis();
+    lastChangeTimeMs = lastGridInitMs;
   }
 }
 
+/**
+ * @brief Fill up the I2S buffer with constrained samples
+ */
 void updateI2SBuf() {
   for (int i = 0; i < i2sBufLenSamples; i++) {
-    i2s_buf[i] = constrain(vReal[i % (fftLen)], -sampleMax, sampleMax);
+    i2sBuf[i] = constrain(vReal[i % (fftLen)], -sampleMax, sampleMax);
   }
 }
 
-void Task0code(void* pvParameters) {
+/**
+ * @brief Task for display and audio compute
+ */
+void DisplayTaskCode(void* pvParameters) {
   for (;;) {
     computeGrid();
     computeAudio();
@@ -211,13 +220,19 @@ void Task0code(void* pvParameters) {
   }
 }
 
-void Task1code(void* pvParameters) {
+/**
+ * @brief Transfers the I2S buffer to the driver
+ */
+void I2STransferTaskCode(void* pvParameters) {
   for (;;) {
     // I2S write is blocking
-    i2s.write((uint8_t*)i2s_buf, i2sBufLenSamples * sizeof(int16_t));
+    i2s.write((uint8_t*)i2sBuf, i2sBufLenSamples * sizeof(int16_t));
   }
 }
 
+/**
+ * @brief Program setup
+ */
 void setup() {
   Serial.begin(9600);
   useRealRandomGenerator(true);
@@ -238,8 +253,8 @@ void setup() {
   display.clearDisplay();
   initGrid();
 
-  xTaskCreatePinnedToCore(Task0code, "Task0", 10000, NULL, 2, &Task0, 0);
-  xTaskCreatePinnedToCore(Task1code, "Task1", 10000, NULL, 3, &Task1, 0);
+  xTaskCreatePinnedToCore(DisplayTaskCode, "DisplayTask", 10000, NULL, 2, &DisplayTask, 0);
+  xTaskCreatePinnedToCore(I2STransferTaskCode, "I2STransferTask", 10000, NULL, 3, &I2STransferTask, 0);
 }
 
 void loop() {
