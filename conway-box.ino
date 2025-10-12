@@ -13,40 +13,31 @@
 #define OLED_RESET -1
 #define SCREEN_ADDRESS 0x3C
 #define SCREEN_I2C_FREQ_HZ 800000
+#define I2S_SCK_PIN 3
+#define I2S_WS_PIN 4
+#define I2S_SDOUT_PIN 2
 
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET, SCREEN_I2C_FREQ_HZ, SCREEN_I2C_FREQ_HZ);
 
 uint8_t grid[SCREEN_HEIGHT][SCREEN_WIDTH];
 uint8_t newGrid[SCREEN_HEIGHT][SCREEN_WIDTH];
 int generation = 0;
-
+const int maxGridLifeSeconds = 60;
 const int sampleRate = 44100;
-
-i2s_data_bit_width_t bps = I2S_DATA_BIT_WIDTH_16BIT;
-i2s_mode_t mode = I2S_MODE_STD;
-i2s_slot_mode_t slot = I2S_SLOT_MODE_MONO;
-
-const uint8_t I2S_SCK = 3;
-const uint8_t I2S_WS = 4;
-const uint8_t I2S_SDOUT = 2;
 
 // Amp is a little overpowered so clamp it to be safe
 float sampleMax = 16000.0f;
-
+float rmsTarget = 1000.0f;
 I2SClass i2s;
+const int i2sBufLenSamples = 1024;
+int16_t i2s_buf[i2sBufLenSamples];
 
 const uint16_t fftLen = 1024;  // must be a power of 2
 const uint16_t fftLenBy2 = fftLen / 2;
 float vReal[fftLen];
 float vImag[fftLen];
-
-const int i2sBufLenSamples = 1024;
-int16_t i2s_buf[i2sBufLenSamples];
-
-
-int freqBins[] = { 3, 5 };
-float fftGain = 4.0f;
-
+const int freqBinMin = 5;
+const int freqBinMax = 400;
 ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, fftLen, sampleRate);
 
 TaskHandle_t Task0;
@@ -106,20 +97,29 @@ int countAliveNeighbours(int i, int j) {
  * applies the rules of the Game of Life to determine whether the cell
  * should be alive or dead in the new grid. The new grid is then
  * copied back into the current grid.
+ *
+ * @return The number of changes to the grid
  */
-void updateGrid() {
+int updateGrid() {
   for (int i = 0; i < SCREEN_HEIGHT; i++) {
     for (int j = 0; j < SCREEN_WIDTH; j++) {
       int count = countAliveNeighbours(i, j);
       newGrid[i][j] = (grid[i][j] == 1) ? (count == 2 || count == 3) : (count == 3);
     }
   }
+
+  int changes = 0;
   for (int i = 0; i < SCREEN_HEIGHT; i++) {
     for (int j = 0; j < SCREEN_WIDTH; j++) {
+      if (grid[i][j] != newGrid[i][j]) {
+        changes++;
+      }
       grid[i][j] = newGrid[i][j];
       display.drawPixel(j, i, grid[i][j] ? SSD1306_WHITE : SSD1306_BLACK);
     }
   }
+
+  return changes;
 }
 
 /**
@@ -133,43 +133,81 @@ void computeAudio() {
     vImag[i] = 0.0f;
   }
 
-  // Loop through the bins and see how much each grid pixel has to contribute
-  // Also only do the real part since imaginary sounds too loud unpleasant
-  const int binsLen = sizeof(freqBins) / sizeof(freqBins[0]);
-  int m = 0;
+  // Loop through and see how much each grid pixel has to contribute
+  // Also only do the real part since messing with the phase sounds too unpleasant
+  float freqScaleWidth = (1.0f / SCREEN_WIDTH) * (freqBinMax - freqBinMin) / 2.0f;
+  float freqScaleHeight = (1.0f / SCREEN_HEIGHT) * (freqBinMax - freqBinMin) / 2.0f;
   for (int i = 0; i < SCREEN_HEIGHT; i++) {
     for (int j = 0; j < SCREEN_WIDTH; j++) {
-      int binMult = 1;
-      if (i > SCREEN_HEIGHT / 2) {
-        binMult = 2;
+      int freqBin = freqBinMin + i * freqScaleHeight + j * freqScaleWidth;
+
+      // Make sure we don't generate something out of bounds
+      if (freqBin > fftLenBy2) {
+        freqBin = fftLenBy2;
       }
-      if (j > SCREEN_WIDTH / 2) {
-        binMult *= 3;
-      }
-      int freqBin = freqBins[(m++) % binsLen] * binMult;
-      freqBin = freqBin % fftLenBy2;
-      vReal[freqBin] += grid[i][j] * 1.0f * fftLenBy2 * fftGain;
+      vReal[freqBin] += grid[i][j] * 1.0f;
     }
   }
 
   // Create conjugate symmetry
-  for (int i = 1; i < fftLenBy2 - 1; i++) {
+  for (int i = 1; i < fftLenBy2; i++) {
     vReal[fftLen - i] = vReal[i];
     vImag[fftLen - i] = -1.0f * vImag[i];
   }
 
   FFT.compute(FFTDirection::Reverse);
+
+  // Normalize it so there aren't huge jumps in volumes when the grid starts out
+  float rms = 0.0f;
+  for (int i = 0; i < fftLen; i++) {
+    rms += vReal[i] * vReal[i];
+  }
+  if (rms > 0.0f) {
+    rms = rms / fftLen;
+    rms = sqrtf(rms);
+
+
+    float gain = rmsTarget / rms;
+
+    for (int i = 0; i < fftLen; i++) {
+      vReal[i] *= gain;
+    }
+  }
+}
+
+void computeGrid() {
+  static int lastChange = 0;
+  static int staticCount = 0;
+  static unsigned long lastGridInitMs = 0;
+
+  int changes = updateGrid();
+  if (lastChange == changes) {
+    staticCount++;
+  } else {
+    staticCount = 0;
+  }
+  lastChange = changes;
+
+  // If we're oscillating, static, or hit the max life then re-init the grid
+  if ((staticCount > 100) || ((millis() - lastGridInitMs) > maxGridLifeSeconds * 1000)) {
+    initGrid();
+    lastGridInitMs = millis();
+  }
+}
+
+void updateI2SBuf() {
+  for (int i = 0; i < i2sBufLenSamples; i++) {
+    i2s_buf[i] = constrain(vReal[i % (fftLen)], -sampleMax, sampleMax);
+  }
 }
 
 void Task0code(void* pvParameters) {
   for (;;) {
-    updateGrid();
+    computeGrid();
     computeAudio();
     display.display();
     // Make the audio reflect what's on the screen now
-    for (int i = 0; i < i2sBufLenSamples; i++) {
-      i2s_buf[i] = constrain(vReal[i % (fftLenBy2)], -sampleMax, sampleMax);
-    }
+    updateI2SBuf();
   }
 }
 
@@ -191,8 +229,8 @@ void setup() {
       ;  // do nothing
   }
 
-  i2s.setPins(I2S_SCK, I2S_WS, I2S_SDOUT);
-  if (!i2s.begin(mode, sampleRate, bps, slot)) {
+  i2s.setPins(I2S_SCK_PIN, I2S_WS_PIN, I2S_SDOUT_PIN);
+  if (!i2s.begin(I2S_MODE_STD, sampleRate, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO)) {
     Serial.println("Failed to initialize I2S!");
     while (1)
       ;  // do nothing
