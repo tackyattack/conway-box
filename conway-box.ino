@@ -37,7 +37,7 @@ const uint16_t fftLenBy2 = fftLen / 2;
 float vReal[fftLen];
 float vImag[fftLen];
 const int freqBinMin = 5;
-const int freqBinMax = 40;
+const int freqBinMax = 20;
 const int widthStride = 15;
 const int heightStride = 15;
 ArduinoFFT<float> FFT = ArduinoFFT<float>(vReal, vImag, fftLen, sampleRate);
