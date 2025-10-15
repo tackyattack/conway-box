@@ -2,7 +2,7 @@
 A little box that shows Conway's Game of Life, along with sound generated from an IFFT of the display grid. Powered by an ESP32-S3.
 
 ### Demo
-<video src="assets/IMG_4711.mp4" width="640" height="480" controls></video>
+<video src="https://github.com/tackyattack/conway-box/blob/master/assets/IMG_4711.mp4" width="640" height="480" controls></video>
 
 ### Parts
 | Part |
